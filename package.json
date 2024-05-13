@@ -6,6 +6,8 @@
     "puppeteer": "^22.6.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-anonymize-ua": "^2.4.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "querystring": "^0.2.1",
+    "unzipper": "^0.11.6"
   }
 }

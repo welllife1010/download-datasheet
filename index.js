@@ -4,33 +4,48 @@ const fs = require("fs")
 const path = require("path")
 const querystring = require("querystring")
 
-// Save the state to a file
+const DOWNLOAD_TIMEOUT = 120000 // 2 minutes timeout
+const S3_BASE_URL =
+  "https://suntsu-products-s3-bucket.s3.us-west-1.amazonaws.com/microprocessor_datasheet/"
+
 function saveState(filePath, state) {
   fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf8")
 }
 
-// Load the state from a file
 function loadState(filePath) {
   if (fs.existsSync(filePath)) {
     return JSON.parse(fs.readFileSync(filePath, "utf8"))
   }
-  return { lastIndex: 0 } // Default state
+  return { lastIndex: 0 }
 }
 
-// Manual delay using setTimeout inside a Promise for asynchronous waiting
-function delay(time) {
-  return new Promise(function (resolve) {
-    setTimeout(resolve, time)
-  })
+function appendToJsonFile(filePath, data) {
+  let array = []
+  if (fs.existsSync(filePath)) {
+    array = JSON.parse(fs.readFileSync(filePath, "utf8"))
+  } else {
+    // Ensure the directory exists
+    const dir = path.dirname(filePath)
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+  }
+  array.push(data)
+  fs.writeFileSync(filePath, JSON.stringify(array, null, 2), "utf8")
 }
 
-// Download using axios with stream
 async function downloadWithAxios(url, outputPath) {
+  const source = axios.CancelToken.source()
+  setTimeout(() => {
+    source.cancel(`Download timeout after ${DOWNLOAD_TIMEOUT / 1000} seconds.`)
+  }, DOWNLOAD_TIMEOUT)
+
   try {
     const response = await axios({
       method: "GET",
       url: url,
       responseType: "stream",
+      cancelToken: source.token,
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
@@ -44,79 +59,21 @@ async function downloadWithAxios(url, outputPath) {
     return new Promise((resolve, reject) => {
       writer.on("finish", () => {
         console.log(`Successfully downloaded ${path.basename(outputPath)}`)
-        resolve()
+        resolve(true)
       })
       writer.on("error", reject)
     })
   } catch (error) {
     console.error(`Error downloading ${url}: ${error.message}`)
-    return null
+    throw new Error(`Failed to download: ${url}`)
   }
-}
-
-// Use Puppeteer for complex and dynamic content interactions
-async function downloadWithPuppeteer(browser, url, outputPath) {
-  const page = await browser.newPage()
-  await page.setViewport({ width: 1280, height: 926 })
-
-  try {
-    await page.goto(url, { waitUntil: "networkidle0", timeout: 0 })
-    await delay(10000) // Initial wait for dynamic content
-
-    // Check for known late-loading elements on TI pages
-    if (url.includes("ti.com")) {
-      try {
-        await page.waitForSelector('a[href*=".pdf"]', { timeout: 20000 })
-        const pdfUrl = await page.$eval(
-          'a[href*=".pdf"]',
-          (anchor) => anchor.href
-        )
-
-        if (pdfUrl) {
-          console.log(`Direct PDF link found: ${pdfUrl}`)
-          return await downloadWithAxios(pdfUrl, outputPath)
-        }
-      } catch (e) {
-        console.log("Proceeding with page interactions and rendering.")
-      }
-    }
-
-    await autoScroll(page)
-    await page.pdf({ path: outputPath, format: "A4" })
-    console.log(`Rendered and saved PDF to ${outputPath}`)
-  } catch (error) {
-    console.error(`Failed to download PDF from ${url}: `, error)
-  } finally {
-    await page.close()
-  }
-}
-
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve, reject) => {
-      var totalHeight = 0
-      var distance = 100
-      var timer = setInterval(() => {
-        var scrollHeight = document.body.scrollHeight
-        window.scrollBy(0, distance)
-        totalHeight += distance
-
-        if (totalHeight >= scrollHeight) {
-          clearInterval(timer)
-          resolve()
-        }
-      }, 100)
-    })
-  })
 }
 
 async function downloadDatasheets(jsonData, outputFolder) {
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  })
   const stateFile = path.join(outputFolder, "state.json")
-  const state = loadState(stateFile)
+  let state = loadState(stateFile)
+  const outputJsonPath = path.join(outputFolder, "output.json")
+  const failedJsonPath = path.join(outputFolder, "failed.json")
 
   if (!fs.existsSync(outputFolder)) {
     fs.mkdirSync(outputFolder, { recursive: true })
@@ -124,57 +81,105 @@ async function downloadDatasheets(jsonData, outputFolder) {
 
   for (let i = state.lastIndex; i < jsonData.length; i++) {
     const item = jsonData[i]
-    if (!item.ManufacturerProductNumber || !item.DatasheetUrl) {
-      console.log("Skipping item:", item)
+    const index = i + 1 // Using 1-based index for clarity in output
+    const partNumber = item.ManufacturerProductNumber
+      ? item.ManufacturerProductNumber.replace(/\//g, "-")
+      : `UnknownPart_${index}`
+
+    let datasheetUrl = item.DatasheetUrl
+      ? item.DatasheetUrl.startsWith("//")
+        ? "https:" + item.DatasheetUrl
+        : item.DatasheetUrl
+      : null
+
+    if (datasheetUrl && datasheetUrl.includes("gotoUrl=")) {
+      const urlParts = new URL(datasheetUrl)
+      const gotoUrl = urlParts.searchParams.get("gotoUrl")
+      datasheetUrl = decodeURIComponent(gotoUrl)
+    }
+
+    if (
+      datasheetUrl &&
+      datasheetUrl.includes(".pdf") &&
+      !datasheetUrl.includes(".pdf?")
+    ) {
+      datasheetUrl = datasheetUrl.split(".pdf")[0] + ".pdf"
+    }
+
+    const datasheetName = `${partNumber}.pdf`
+    const outputPath = path.join(outputFolder, datasheetName)
+
+    let datasheetLogUrl = datasheetUrl
+
+    // Check for mm.digikey.com to adjust the log URL
+    if (datasheetUrl && datasheetUrl.includes("mm.digikey.com")) {
+      datasheetLogUrl = `${S3_BASE_URL}${datasheetName}`
+    }
+
+    appendToJsonFile(outputJsonPath, {
+      index: index,
+      partNumber: partNumber,
+      datasheetUrl: datasheetLogUrl,
+    })
+
+    if (!datasheetUrl) {
+      console.log(
+        `Skipping download due to missing URL for index ${index}, part number: ${partNumber}`
+      )
+      appendToJsonFile(failedJsonPath, {
+        index: index,
+        partNumber: partNumber,
+        datasheetUrl: null,
+        reason: "Missing or invalid URL",
+      })
       continue
     }
 
-    const manufacturerProductNumber = item.ManufacturerProductNumber.replace(
-      /\//g,
-      "-"
+    console.log(
+      `Processing index ${index}, ${datasheetName} from ${datasheetUrl}`
     )
-    const datasheetUrl = item.DatasheetUrl.startsWith("//")
-      ? "https:" + item.DatasheetUrl
-      : item.DatasheetUrl
 
-    const datasheetName = `${manufacturerProductNumber}.pdf`
-    const datasheetPath = path.join(outputFolder, datasheetName)
-
-    console.log(`Processing ${datasheetName} from ${datasheetUrl}`)
-
-    // Decode 'gotoUrl' if present
-    if (datasheetUrl.includes("gotoUrl=")) {
-      const parsedUrl = new URL(datasheetUrl)
-      const gotoUrl = parsedUrl.searchParams.get("gotoUrl")
-      const decodedUrl = decodeURIComponent(gotoUrl)
-
-      console.log(`Decoded direct PDF link: ${decodedUrl}`)
-      await downloadWithAxios(decodedUrl, datasheetPath)
-    } else if (datasheetUrl.endsWith(".pdf")) {
-      console.log(`Using axios for direct download from ${datasheetUrl}`)
-      await downloadWithAxios(datasheetUrl, datasheetPath)
-    } else if (datasheetUrl.includes("ti.com")) {
-      console.log(
-        `Using Puppeteer for complex interaction with ${datasheetUrl}`
-      )
-      await downloadWithPuppeteer(browser, datasheetUrl, datasheetPath)
-    } else {
-      console.log(`Using axios for direct download from ${datasheetUrl}`)
-      await downloadWithAxios(datasheetUrl, datasheetPath)
+    try {
+      if (datasheetUrl.includes("www.renesas.com")) {
+        console.log(`Using original URL for Renesas link: ${datasheetUrl}`)
+      } else {
+        console.log(`Downloading from ${datasheetUrl}`)
+        await downloadWithAxios(datasheetUrl, outputPath)
+        if (datasheetUrl.includes("mm.digikey.com")) {
+          // Update the S3 URL only if downloaded from Digikey
+          appendToJsonFile(outputJsonPath, {
+            index: index,
+            partNumber: partNumber,
+            datasheetUrl: `${S3_BASE_URL}${datasheetName}`,
+          })
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to process index ${index}, ${partNumber}: ${error}`)
+      appendToJsonFile(failedJsonPath, {
+        index: index,
+        partNumber: partNumber,
+        datasheetUrl: datasheetUrl,
+        reason: error.message,
+      })
+      // If failed, revert datasheetUrl to original for this index in output.json
+      appendToJsonFile(outputJsonPath, {
+        index: index,
+        partNumber: partNumber,
+        datasheetUrl: datasheetUrl,
+      })
     }
 
     state.lastIndex = i + 1
     saveState(stateFile, state)
   }
 
-  await browser.close()
-  console.log("All datasheets downloaded successfully.")
+  console.log("All datasheets processed.")
 }
 
 ;(async () => {
-  const jsonFilePath = "./reference-files/microprocessor-datasheet-0510.json"
-  const jsonData = require(jsonFilePath)
-  const outputFolder = "./generated-folders/microprocessor_datasheets"
+  const jsonData = require("./reference-files/microprocessor-datasheet-0510.json")
+  const outputFolder = "./generated-folders/microprocessor_datasheet"
 
   await downloadDatasheets(jsonData, outputFolder)
 })()
