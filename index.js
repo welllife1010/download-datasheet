@@ -1,4 +1,5 @@
 const axios = require("axios").default
+const puppeteer = require("puppeteer")
 const fs = require("fs")
 const path = require("path")
 
@@ -86,6 +87,41 @@ async function downloadWithAxios(url, outputPath, userAgent) {
   }
 }
 
+async function downloadWithPuppeteer(url, outputPath) {
+  const browser = await puppeteer.launch({ headless: true })
+  const page = await browser.newPage()
+
+  try {
+    await page.goto(url, { waitUntil: "networkidle2" })
+
+    // Extract the actual PDF URL from the viewer page
+    const pdfUrl = await page.evaluate(() => {
+      const iframe = document.querySelector("iframe")
+      if (iframe) {
+        return iframe.src
+      }
+      return null
+    })
+
+    if (!pdfUrl) {
+      throw new Error("PDF URL not found in viewer page")
+    }
+
+    await page.goto(pdfUrl, { waitUntil: "networkidle2" })
+    const pdfBuffer = await page.pdf()
+
+    fs.writeFileSync(outputPath, pdfBuffer)
+    console.log(
+      `Successfully downloaded ${path.basename(outputPath)} via Puppeteer`
+    )
+  } catch (error) {
+    console.error(`Error downloading ${url} with Puppeteer: ${error.message}`)
+    throw new Error(`Failed to download: ${url}`)
+  } finally {
+    await browser.close()
+  }
+}
+
 function extractValidUrl(url) {
   if (!url) return null
 
@@ -148,10 +184,14 @@ async function downloadDatasheets(jsonData, outputFolder) {
     let success = false
     for (const userAgent of USER_AGENTS) {
       try {
-        console.log(
-          `Downloading from ${datasheetUrl} with User-Agent: ${userAgent}`
-        )
-        await downloadWithAxios(datasheetUrl, outputPath, userAgent)
+        if (datasheetUrl.includes("widen.net")) {
+          await downloadWithPuppeteer(datasheetUrl, outputPath)
+        } else {
+          console.log(
+            `Downloading from ${datasheetUrl} with User-Agent: ${userAgent}`
+          )
+          await downloadWithAxios(datasheetUrl, outputPath, userAgent)
+        }
 
         // Update output.json only after successful download
         const updatedEntry = {
