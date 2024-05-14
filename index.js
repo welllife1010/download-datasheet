@@ -1,5 +1,4 @@
 const axios = require("axios").default
-const puppeteer = require("puppeteer")
 const fs = require("fs")
 const path = require("path")
 
@@ -87,48 +86,13 @@ async function downloadWithAxios(url, outputPath, userAgent) {
   }
 }
 
-async function downloadWithPuppeteer(url, outputPath) {
-  const browser = await puppeteer.launch({ headless: true })
-  const page = await browser.newPage()
-
-  try {
-    await page.goto(url, { waitUntil: "networkidle2" })
-
-    // Extract the actual PDF URL from the viewer page
-    const pdfUrl = await page.evaluate(() => {
-      const iframe = document.querySelector("iframe")
-      if (iframe) {
-        return iframe.src
-      }
-      return null
-    })
-
-    if (!pdfUrl) {
-      throw new Error("PDF URL not found in viewer page")
-    }
-
-    await page.goto(pdfUrl, { waitUntil: "networkidle2" })
-    const pdfBuffer = await page.pdf()
-
-    fs.writeFileSync(outputPath, pdfBuffer)
-    console.log(
-      `Successfully downloaded ${path.basename(outputPath)} via Puppeteer`
-    )
-  } catch (error) {
-    console.error(`Error downloading ${url} with Puppeteer: ${error.message}`)
-    throw new Error(`Failed to download: ${url}`)
-  } finally {
-    await browser.close()
-  }
-}
-
 function extractValidUrl(url) {
   if (!url) return null
 
-  // Extract URL up to and including .pdf
+  // Extract URL up to and including .pdf and keep query parameters
   const pdfIndex = url.indexOf(".pdf")
   if (pdfIndex !== -1) {
-    return url.substring(0, pdfIndex + 4) // Include .pdf
+    return url.substring(0, pdfIndex + 4) + url.substring(pdfIndex + 4) // Include .pdf and keep query parameters
   }
 
   // Return the original URL if no special handling is required
@@ -157,80 +121,76 @@ async function downloadDatasheets(jsonData, outputFolder) {
     const datasheetName = `${partNumber}.pdf`
     const outputPath = path.join(outputFolder, datasheetName)
 
-    // Initially, assume the download will be successful
-    appendToJsonFile(outputJsonPath, {
-      index: index,
-      partNumber: partNumber,
-      datasheetUrl: datasheetUrl, // Use original URL in output.json until download is confirmed
-    })
+    if (datasheetUrl) {
+      const shouldDownload = datasheetUrl.includes("mm.digikey.com")
 
-    if (!datasheetUrl) {
-      console.log(
-        `Skipping download due to missing URL for index ${index}, part number: ${partNumber}`
-      )
-      appendToJsonFile(failedJsonPath, {
-        index: index,
-        partNumber: partNumber,
-        datasheetUrl: null,
-        reason: "Missing or invalid URL",
-      })
-      continue
-    }
-
-    console.log(
-      `Processing index ${index}, ${datasheetName} from ${datasheetUrl}`
-    )
-
-    let success = false
-    for (const userAgent of USER_AGENTS) {
-      try {
-        if (datasheetUrl.includes("widen.net")) {
-          await downloadWithPuppeteer(datasheetUrl, outputPath)
-        } else {
-          console.log(
-            `Downloading from ${datasheetUrl} with User-Agent: ${userAgent}`
-          )
-          await downloadWithAxios(datasheetUrl, outputPath, userAgent)
-        }
-
-        // Update output.json only after successful download
-        const updatedEntry = {
-          index: index,
-          partNumber: partNumber,
-          datasheetUrl: `${S3_BASE_URL}${datasheetName}`, // Update with S3 URL upon successful download
-        }
-
-        // Remove the old entry and add the updated entry
-        let outputData = JSON.parse(fs.readFileSync(outputJsonPath, "utf8"))
-        outputData = outputData.filter((entry) => entry.index !== index)
-        outputData.push(updatedEntry)
-        fs.writeFileSync(
-          outputJsonPath,
-          JSON.stringify(outputData, null, 2),
-          "utf8"
+      if (shouldDownload) {
+        console.log(
+          `Processing index ${index}, ${datasheetName} from ${datasheetUrl}`
         )
 
-        success = true
-        break
-      } catch (error) {
-        console.error(
-          `Failed to process index ${index}, ${partNumber} with User-Agent ${userAgent}: ${error}`
-        )
-        appendToJsonFile(failedJsonPath, {
+        let success = false
+        for (const userAgent of USER_AGENTS) {
+          try {
+            console.log(
+              `Downloading from ${datasheetUrl} with User-Agent: ${userAgent}`
+            )
+            await downloadWithAxios(datasheetUrl, outputPath, userAgent)
+
+            // Update output.json only after successful download
+            const updatedEntry = {
+              index: index,
+              partNumber: partNumber,
+              datasheetUrl: `${S3_BASE_URL}${datasheetName}`, // Update with S3 URL upon successful download
+            }
+
+            // Remove the old entry and add the updated entry
+            let outputData = JSON.parse(fs.readFileSync(outputJsonPath, "utf8"))
+            outputData = outputData.filter((entry) => entry.index !== index)
+            outputData.push(updatedEntry)
+            fs.writeFileSync(
+              outputJsonPath,
+              JSON.stringify(outputData, null, 2),
+              "utf8"
+            )
+
+            success = true
+            break
+          } catch (error) {
+            console.error(
+              `Failed to process index ${index}, ${partNumber} with User-Agent ${userAgent}: ${error}`
+            )
+            appendToJsonFile(failedJsonPath, {
+              index: index,
+              partNumber: partNumber,
+              datasheetUrl: datasheetUrl,
+              reason: error.message,
+            })
+          }
+        }
+
+        if (!success) {
+          appendToJsonFile(failedJsonPath, {
+            index: index,
+            partNumber: partNumber,
+            datasheetUrl: datasheetUrl,
+            reason: "All user agents failed",
+          })
+        }
+      } else {
+        // If we don't need to download, just copy the original URL to the output
+        appendToJsonFile(outputJsonPath, {
           index: index,
           partNumber: partNumber,
-          datasheetUrl: datasheetUrl,
-          reason: error.message,
+          datasheetUrl: datasheetUrl, // Use original URL
         })
       }
-    }
-
-    if (!success) {
-      appendToJsonFile(failedJsonPath, {
+    } else {
+      // If datasheetUrl is null, keep it as null in the output.json
+      appendToJsonFile(outputJsonPath, {
         index: index,
         partNumber: partNumber,
-        datasheetUrl: datasheetUrl,
-        reason: "All user agents failed",
+        datasheetUrl: null, // Keep null value
       })
     }
 
@@ -242,8 +202,8 @@ async function downloadDatasheets(jsonData, outputFolder) {
 }
 
 ;(async () => {
-  const jsonData = require("./reference-files/test-temp.json")
-  const outputFolder = "./generated-folders/test-folder"
+  const jsonData = require("./reference-files/microprocessor-datasheet-0510.json")
+  const outputFolder = "./generated-folders/microprocessor_datasheet"
 
   await downloadDatasheets(jsonData, outputFolder)
 })()
