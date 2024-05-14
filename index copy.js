@@ -1,6 +1,8 @@
 const axios = require("axios").default
+const puppeteer = require("puppeteer")
 const fs = require("fs")
 const path = require("path")
+const querystring = require("querystring")
 
 const DOWNLOAD_TIMEOUT = 120000 // 2 minutes timeout
 const S3_BASE_URL =
@@ -36,13 +38,7 @@ function appendToJsonFile(filePath, data) {
       fs.mkdirSync(dir, { recursive: true })
     }
   }
-
-  // Check for duplicates
-  const exists = array.some((item) => item.index === data.index)
-  if (!exists) {
-    array.push(data)
-  }
-
+  array.push(data)
   fs.writeFileSync(filePath, JSON.stringify(array, null, 2), "utf8")
 }
 
@@ -86,19 +82,6 @@ async function downloadWithAxios(url, outputPath, userAgent) {
   }
 }
 
-function extractValidUrl(url) {
-  if (!url) return null
-
-  // Extract URL up to and including .pdf
-  const pdfIndex = url.indexOf(".pdf")
-  if (pdfIndex !== -1) {
-    return url.substring(0, pdfIndex + 4) // Include .pdf
-  }
-
-  // Return the original URL if no special handling is required
-  return url
-}
-
 async function downloadDatasheets(jsonData, outputFolder) {
   const stateFile = path.join(outputFolder, "state.json")
   let state = loadState(stateFile)
@@ -116,7 +99,27 @@ async function downloadDatasheets(jsonData, outputFolder) {
       ? item.ManufacturerProductNumber.replace(/\//g, "-")
       : `UnknownPart_${index}`
 
-    let datasheetUrl = extractValidUrl(item.DatasheetUrl)
+    let datasheetUrl = item.DatasheetUrl
+      ? item.DatasheetUrl.startsWith("//")
+        ? "https:" + item.DatasheetUrl
+        : item.DatasheetUrl
+      : null
+
+    if (datasheetUrl && datasheetUrl.includes("gotoUrl=")) {
+      // Decode the URL if it contains 'gotoUrl'
+      const urlParts = new URL(datasheetUrl)
+      const gotoUrl = urlParts.searchParams.get("gotoUrl")
+      datasheetUrl = decodeURIComponent(gotoUrl)
+    }
+
+    // Check if the URL directly has a .pdf in the path
+    if (
+      datasheetUrl &&
+      datasheetUrl.includes(".pdf") &&
+      !datasheetUrl.includes(".pdf?")
+    ) {
+      datasheetUrl = datasheetUrl.split(".pdf")[0] + ".pdf"
+    }
 
     const datasheetName = `${partNumber}.pdf`
     const outputPath = path.join(outputFolder, datasheetName)
@@ -148,28 +151,21 @@ async function downloadDatasheets(jsonData, outputFolder) {
     let success = false
     for (const userAgent of USER_AGENTS) {
       try {
-        console.log(
-          `Downloading from ${datasheetUrl} with User-Agent: ${userAgent}`
-        )
-        await downloadWithAxios(datasheetUrl, outputPath, userAgent)
+        if (datasheetUrl.includes("www.renesas.com")) {
+          console.log(`Using original URL for Renesas link: ${datasheetUrl}`)
+        } else {
+          console.log(
+            `Downloading from ${datasheetUrl} with User-Agent: ${userAgent}`
+          )
+          await downloadWithAxios(datasheetUrl, outputPath, userAgent)
 
-        // Update output.json only after successful download
-        const updatedEntry = {
-          index: index,
-          partNumber: partNumber,
-          datasheetUrl: `${S3_BASE_URL}${datasheetName}`, // Update with S3 URL upon successful download
+          // Update output.json only after successful download
+          appendToJsonFile(outputJsonPath, {
+            index: index,
+            partNumber: partNumber,
+            datasheetUrl: `${S3_BASE_URL}${datasheetName}`, // Update with S3 URL upon successful download
+          })
         }
-
-        // Remove the old entry and add the updated entry
-        let outputData = JSON.parse(fs.readFileSync(outputJsonPath, "utf8"))
-        outputData = outputData.filter((entry) => entry.index !== index)
-        outputData.push(updatedEntry)
-        fs.writeFileSync(
-          outputJsonPath,
-          JSON.stringify(outputData, null, 2),
-          "utf8"
-        )
-
         success = true
         break
       } catch (error) {
@@ -202,8 +198,8 @@ async function downloadDatasheets(jsonData, outputFolder) {
 }
 
 ;(async () => {
-  const jsonData = require("./reference-files/test-temp.json")
-  const outputFolder = "./generated-folders/test-folder"
+  const jsonData = require("./reference-files/microprocessor-datasheet-0510.json")
+  const outputFolder = "./generated-folders/microprocessor_datasheet"
 
   await downloadDatasheets(jsonData, outputFolder)
 })()
