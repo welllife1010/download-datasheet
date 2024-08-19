@@ -4,7 +4,7 @@ const path = require("path")
 
 const DOWNLOAD_TIMEOUT = 120000 // 2 minutes timeout
 const S3_BASE_URL =
-  "https://suntsu-products-s3-bucket.s3.us-west-1.amazonaws.com/microprocessor_datasheet/"
+  "https://suntsu-products-s3-bucket.s3.us-west-1.amazonaws.com/rf_switch_datasheets/"
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
@@ -122,7 +122,7 @@ async function downloadDatasheets(jsonData, outputFolder) {
     const outputPath = path.join(outputFolder, datasheetName)
 
     if (datasheetUrl) {
-      const shouldDownload = datasheetUrl.includes("mm.digikey.com")
+      const shouldDownload = datasheetUrl.includes("media.digikey.com")
 
       if (shouldDownload) {
         console.log(
@@ -202,8 +202,9 @@ async function downloadDatasheets(jsonData, outputFolder) {
 }
 
 ;(async () => {
-  const jsonData = require("./reference-files/microprocessor-datasheet-0510.json")
-  const outputFolder = "./generated-folders/microprocessor_datasheet"
+  const jsonData = require("./reference-files/fpga-field-programmable-gate-array-0515.json")
+  const outputFolder =
+    "./generated-folders/fpga_field_programmable_gate_array_datasheets_0520_v2"
 
   await downloadDatasheets(jsonData, outputFolder)
 })()
